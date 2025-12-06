@@ -21,8 +21,8 @@
 
 ## 📊 Pre-Training towards Unified Representation for US Imaging
 
-Here, we provide the inference codes to show the effectivenss of the [pre-trained models] on reconstruct the masked US images and capture the discriminative features.
-<div style="display: flex; justify-content: center;">
+Here, we provide the inference codes to show the effectivenss of the [pre-trained models](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link) on reconstruct the masked US images and capture the discriminative features.
+<div align="center", style="display: flex; justify-content: center;">
   <img src="./imgs/visualization_similarity1.png" style="width:34%; margin-right:1%;">
   <img src="./imgs/visualization_similarity.png" style="width:34%;">
 </div>
@@ -32,24 +32,24 @@ Detailed feature visualization and image inference codes are define in test_mode
 ```Python
 import torch
 import torch.nn.functional as F
-from model.swin import VisionUlt
+from load_model import VisionUlt
 import os
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
-from dataset_mae_cnn import get_data
+from dataset import get_data
 
-# 设置设备
+# Set device
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==========================================
-# 1. 辅助函数
+# 1. Helper Functions
 # ==========================================
 
 def denormalize(img_tensor):
     """
-    将 ImageNet 标准化的 tensor 转回 0-255 的 numpy array (H, W, C)
+    Convert an ImageNet-standardized tensor back to a 0-255 numpy array (H, W, C)
     """
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(img_tensor.device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(img_tensor.device)
@@ -61,35 +61,35 @@ def denormalize(img_tensor):
 
 def compute_similarity_heatmap(feats, img_size, pool_type='avg'):
     """
-    计算特征图与全局特征的余弦相似度热力图
+    Compute a cosine similarity heatmap between feature maps and global features
     
     Args:
-        feats: [B, H, W, C] 输入特征
-        img_size: (Target_H, Target_W) 原图尺寸
-        pool_type: 'avg' (平均池化) 或 'max' (最大池化)
+        feats: [B, H, W, C] Input features
+        img_size: (Target_H, Target_W) Original image size
+        pool_type: 'avg' (average pooling) or 'max' (max pooling)
     """
     B, H, W, C = feats.shape
     
-    # 1. 计算全局特征向量 (Global Feature Vector)
-    # 在空间维度 (H, W) 即维度 1 和 2 上进行池化
+    # 1. Compute global feature vector
+    # Perform pooling on spatial dimensions (H, W), i.e., dimensions 1 and 2
     if pool_type == 'avg':
         # [B, H, W, C] -> [B, 1, 1, C]
         global_feat = feats.mean(dim=(1, 2), keepdim=True)
     elif pool_type == 'max':
         # [B, H, W, C] -> [B, C] -> [B, 1, 1, C]
-        # torch.amax 支持多维度 max
+        # torch.amax supports multi-dimension max
         global_feat = torch.amax(feats, dim=(1, 2), keepdim=True)
     else:
         raise ValueError("pool_type must be 'avg' or 'max'")
         
-    # 2. 计算余弦相似度
+    # 2. Compute cosine similarity
     # feats:       [B, H, W, C]
     # global_feat: [B, 1, 1, C]
-    # F.cosine_similarity 会自动广播，沿着 dim=-1 (通道) 计算
-    similarity_map = F.cosine_similarity(feats, global_feat, dim=-1) # 结果: [B, H, W]
+    # F.cosine_similarity automatically broadcasts and computes along dim=-1 (channel)
+    similarity_map = F.cosine_similarity(feats, global_feat, dim=-1) # Result: [B, H, W]
     
-    # 3. 上采样到原图尺寸
-    # 插值需要 [B, C, H, W] 格式，这里 C=1
+    # 3. Upsample to original image size
+    # Interpolation requires [B, C, H, W] format, where C=1
     similarity_map = similarity_map.unsqueeze(1) # [B, 1, H, W]
     similarity_map = F.interpolate(similarity_map, size=img_size, mode='bilinear', align_corners=False)
     similarity_map = similarity_map.squeeze(1)   # [B, Target_H, Target_W]
@@ -98,31 +98,31 @@ def compute_similarity_heatmap(feats, img_size, pool_type='avg'):
 
 def apply_heatmap_overlay(img_rgb, heatmap_tensor):
     """
-    将热力图叠加到原图上
+    Overlay a heatmap on the original image
     """
-    # 转为 numpy
+    # Convert to numpy
     heatmap_np = heatmap_tensor.cpu().detach().numpy()
     
-    # 归一化 (Min-Max) 到 0-1
-    # 余弦相似度范围通常在 [-1, 1]，我们需要将其映射到可视化范围
+    # Normalize (Min-Max) to 0-1
+    # Cosine similarity range is typically [-1, 1], so we map it to the visualization range
     heatmap_np = heatmap_np - np.min(heatmap_np)
     heatmap_np = heatmap_np / (np.max(heatmap_np) + 1e-8)
     
-    # 转换为伪彩色
+    # Convert to pseudo-color
     heatmap_uint8 = (heatmap_np * 255).astype(np.uint8)
     heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
     heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
     
-    # 叠加
+    # Overlay
     overlay = cv2.addWeighted(img_rgb, 0.6, heatmap_color, 0.4, 0)
     
     return heatmap_color, overlay
 
 # ==========================================
-# 2. 模型加载
+# 2. Model Loading
 # ==========================================
 
-path = "path_for_downloaded_pth_file"
+path = "your_downloaded_pth_file"
 
 model = VisionUlt().to(device)
 checkpoint = torch.load(path, map_location=device)
@@ -132,10 +132,10 @@ model.eval()
 
 print("Model loaded successfully.")
 
-dataloader = get_data(data_root="path_for_your_test_images", batch_size=4)
+dataloader = get_data(data_root="your_test_images", batch_size=4)
 
 # ==========================================
-# 3. 主循环与可视化
+# 3. Main Loop and Visualization
 # ==========================================
 
 for data in dataloader:
@@ -143,10 +143,10 @@ for data in dataloader:
     image = image.to(device)
     mask = mask.to(device)
     
-    # 推理
+    # Inference
     with torch.no_grad():
         image_recon = model(image, mask)
-        # 获取特征: [B, H, W, C]
+        # Get features: [B, H, W, C]
         feats = model.model(image * (1 - mask))[3]
         feats = model.merge(feats)
     
@@ -155,20 +155,20 @@ for data in dataloader:
     mse = ((image_recon - image) ** 2).mean()
     print(f"mse is {mse}")
 
-    # 准备可视化数据
+    # Prepare data for visualization
     batch_size = image.shape[0]
     img_h, img_w = image.shape[2], image.shape[3]
     
-    # --- 核心修改：计算相似度热力图 ---
-    # 您可以选择 pool_type='avg' 或 'max'
+    # --- Core modification: compute similarity heatmap ---
+    # You can choose pool_type='avg' or 'max'
     heatmaps_resized = compute_similarity_heatmap(feats, (img_h, img_w), pool_type='max')
     
-    # 创建画布
+    # Create canvas
     fig, axs = plt.subplots(batch_size, 4, figsize=(16, 4 * batch_size))
     if batch_size == 1: axs = axs[None, :]
     
     for i in range(batch_size):
-        # 1. 原始图片
+        # 1. Original Image
         img_orig = denormalize(image[i])
         img_recon = denormalize(image_recon[i])
         
@@ -180,7 +180,7 @@ for data in dataloader:
         # 3. Similarity Heatmap & Overlay
         heatmap_vis, overlay_vis = apply_heatmap_overlay(img_orig, heatmaps_resized[i])
         
-        # --- 绘图 ---
+        # --- Plot ---
         axs[i, 0].imshow(img_orig)
         axs[i, 0].set_title("Original Image")
         axs[i, 0].axis('off')
@@ -213,6 +213,7 @@ for data in dataloader:
   <div align="center">
   <img src="./imgs/pipe.jpg" width="50%">
   </div>
+
 The training and testing datasets are defined in ./dataset_mae_cnn.py, with the data pre-processing augmentation pipeline and masking strategy.
 Our in-house pre-trained data consists of a large-scale dataset of **21,140,761** covering **20
 major organs**, enabling comprehensive model training and evaluation, collected from 10 types of ultrasound equipment/sensors.
