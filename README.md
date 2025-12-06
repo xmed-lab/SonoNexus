@@ -21,7 +21,7 @@
 
 ## 📊 Pre-Training towards Unified Representation for US Imaging
 
-Here, we provide the inference codes to show the effectivenss of the [pre-trained models](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link) on reconstruct the masked US images and capture the discriminative features.
+Here, we provide the inference codes to show the effectivenss of the [pre-trained models](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link) on reconstructing the masked US images and capturing the discriminative features.
 <div align="center", style="display: flex; justify-content: center;">
   <img src="./imgs/visualization_similarity1.png" style="width:34%; margin-right:1%;">
   <img src="./imgs/visualization_similarity.png" style="width:34%;">
