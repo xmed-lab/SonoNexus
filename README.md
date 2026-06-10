@@ -30,10 +30,11 @@ SonoNexus is a foundation model for ultrasound images across heterogeneous scann
 | Mask generation and augmentation | Available | `dataset_mae_cnn.py` |
 | SonoNexus backbone | Available | `model/swin.py` |
 | Pre-trained checkpoint loader | Available | `load_model.py` |
-| Downstream classification demo | Available | `downstream/train_classification_demo.py` |
-| Downstream diagnosis demo | Available | `downstream/train_diagnosis_demo.py` |
-| Downstream segmentation demo | Available | `downstream/train_segmentation_demo.py` |
-| Feature and reconstruction visualization | Available | `tools/visualize_pretrained_features.py` |
+| LoRA downstream utilities | Available | `sononexus_downstream.py` |
+| Downstream classification demo | Available | `train_classification_demo.py` |
+| Downstream diagnosis demo | Available | `train_diagnosis_demo.py` |
+| Downstream segmentation demo | Available | `train_segmentation_demo.py` |
+| Feature and reconstruction visualization | Available | `visualize_pretrained_features.py` |
 
 ## News
 
@@ -93,21 +94,29 @@ python load_model.py \
 
 ## Downstream Demos
 
-The repository now provides three clean demo trainers. Dataset definitions are intentionally lightweight: each script contains a `build_train_loader(args)` function and a dummy dataset so the training loop can be smoke-tested immediately. Replace that function with your real dataset when ready.
+The repository now provides three clean demo trainers in the project root. Each downstream script follows the same transfer recipe:
+
+- load the SonoNexus pre-trained model
+- freeze the pre-trained backbone weights
+- inject trainable LoRA adapters into Swin linear layers
+- train only LoRA parameters and the task-specific head/decoder
+
+Dataset definitions are intentionally lightweight: each script contains a `build_train_loader(args)` function and a dummy dataset so the training loop can be smoke-tested immediately. Replace that function with your real dataset when ready.
 
 ### 1. Fetal View / General Classification
 
 Use this for mutually exclusive classes such as fetal ultrasound view classification or organ category classification.
 
 ```bash
-python downstream/train_classification_demo.py \
+python train_classification_demo.py \
   --checkpoint /path/to/sononexus_pretrained.pth \
   --num-classes 5 \
+  --lora-rank 8 \
   --batch-size 8 \
   --epochs 2
 ```
 
-Loss: `CrossEntropyLoss`
+Loss: `CrossEntropyLoss`. Trainable modules: LoRA adapters plus the classification head.
 
 <div align="center">
   <img src="./imgs/vc.jpg" width="52%" alt="Fetal view classification">
@@ -118,14 +127,15 @@ Loss: `CrossEntropyLoss`
 Use this for binary or multi-label disease diagnosis. The demo head produces `num_labels` logits and trains with `BCEWithLogitsLoss`.
 
 ```bash
-python downstream/train_diagnosis_demo.py \
+python train_diagnosis_demo.py \
   --checkpoint /path/to/sononexus_pretrained.pth \
   --num-labels 4 \
+  --lora-rank 8 \
   --batch-size 8 \
   --epochs 2
 ```
 
-Loss: `BCEWithLogitsLoss`
+Loss: `BCEWithLogitsLoss`. Trainable modules: LoRA adapters plus the multi-label diagnosis head.
 
 <div align="center">
   <img src="./imgs/ds.jpg" width="52%" alt="Disease classification">
@@ -133,12 +143,13 @@ Loss: `BCEWithLogitsLoss`
 
 ### 3. Organ / Lesion Segmentation
 
-Use this for binary masks or multi-class masks. The demo attaches a compact decoder to the SonoNexus backbone and upsamples logits to the input image size.
+Use this for binary masks or multi-class masks. The demo extracts multi-scale features from the frozen SonoNexus backbone and feeds them into a UNet-like decoder with skip connections.
 
 ```bash
-python downstream/train_segmentation_demo.py \
+python train_segmentation_demo.py \
   --checkpoint /path/to/sononexus_pretrained.pth \
   --num-classes 1 \
+  --lora-rank 8 \
   --batch-size 4 \
   --epochs 2
 ```
@@ -148,13 +159,15 @@ Loss:
 - `BCEWithLogitsLoss + Dice loss` for `--num-classes 1`
 - `CrossEntropyLoss` for `--num-classes > 1`
 
+Trainable modules: LoRA adapters plus the UNet-like decoder. The frozen pre-trained model supplies four Swin feature scales.
+
 <div align="center">
   <img src="./imgs/os.jpg" width="52%" alt="Organ segmentation">
 </div>
 
 ## Feature Visualization
 
-`tools/visualize_pretrained_features.py` provides a complete visualization workflow for pre-trained SonoNexus checkpoints:
+`visualize_pretrained_features.py` provides a complete visualization workflow for pre-trained SonoNexus checkpoints:
 
 - masked-input reconstruction preview
 - average-pooled token similarity map
@@ -163,7 +176,7 @@ Loss:
 - CSV export of embedding coordinates
 
 ```bash
-python tools/visualize_pretrained_features.py \
+python visualize_pretrained_features.py \
   --image-dir /path/to/ultrasound/images \
   --checkpoint /path/to/sononexus_pretrained.pth \
   --output-dir outputs/feature_visualization \
@@ -185,9 +198,9 @@ If images are arranged as `root/class_name/image.png`, parent folder names are u
 
 | Task | Typical head | Demo |
 | --- | --- | --- |
-| Fetal ultrasound view classification | pooled feature + linear classifier | `train_classification_demo.py` |
-| Disease classification / diagnosis | pooled feature + multi-label classifier | `train_diagnosis_demo.py` |
-| Organ or lesion segmentation | compact decoder + upsampling head | `train_segmentation_demo.py` |
+| Fetal ultrasound view classification | frozen backbone + LoRA + pooled classifier | `train_classification_demo.py` |
+| Disease classification / diagnosis | frozen backbone + LoRA + multi-label head | `train_diagnosis_demo.py` |
+| Organ or lesion segmentation | frozen backbone + LoRA + multi-scale UNet-like decoder | `train_segmentation_demo.py` |
 | Anatomical structure detection | detector head on SonoNexus features | planned |
 
 <div align="center">
@@ -202,17 +215,15 @@ SonoNexus-main/
 ├── main_mae_cnn.py                       # Pre-training launch script
 ├── train_mae_cnn.py                      # Pre-training loop and logging
 ├── load_model.py                         # Released checkpoint loader/converter
+├── sononexus_downstream.py               # Frozen backbone, LoRA, downstream heads/decoder
+├── train_classification_demo.py          # LoRA multi-class classification demo
+├── train_diagnosis_demo.py               # LoRA multi-label diagnosis demo
+├── train_segmentation_demo.py            # LoRA multi-scale UNet-like segmentation demo
+├── visualize_pretrained_features.py      # Reconstruction and feature visualization
 ├── model/
 │   ├── swin.py                           # SonoNexus MAE backbone
 │   ├── mednext.py                        # MedNeXt encoder experiments
 │   └── vqvae.py
-├── downstream/
-│   ├── common.py                         # Shared downstream model heads/utilities
-│   ├── train_classification_demo.py      # Multi-class classification demo
-│   ├── train_diagnosis_demo.py           # Multi-label diagnosis demo
-│   └── train_segmentation_demo.py        # Binary/multi-class segmentation demo
-├── tools/
-│   └── visualize_pretrained_features.py  # Reconstruction and feature visualization
 └── imgs/                                 # README figures
 ```
 
