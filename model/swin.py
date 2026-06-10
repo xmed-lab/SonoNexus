@@ -52,6 +52,10 @@ class VisionUlt(nn.Module):
         self.decoder_blocks = nn.Sequential(*[
             Block(512, 8, mlp_ratio=4.0, qkv_bias=True, norm_layer=nn.LayerNorm)
             for i in range(decoder_depth)])
+
+        self.merge = nn.Sequential(
+                nn.Linear(768, 768)   # Base 768; large: 1024
+            )
         
         self.decoder_fc = nn.Linear(512, out_channels, bias=True) 
 
@@ -75,9 +79,11 @@ class VisionUlt(nn.Module):
         ### Contrastive Learning
         f3 = F.avg_pool2d(f3, kernel_size=(14, 14))
         f3 = f3.squeeze(-1).squeeze(-1)
+        f3 = self.merge(f3)
 
         f3_mask = F.avg_pool2d(f3_mask, kernel_size=(14, 14))
         f3_mask = f3_mask.squeeze(-1).squeeze(-1)
+        f3_mask = self.merge(f3_mask)
 
         loss_cl = info_nce_loss(f3, f3_mask)
         #print(loss_cl)
