@@ -39,7 +39,12 @@ class VisionUlt(nn.Module):
         super().__init__()
         self.patch_size = patch_size
         print("swin")
-        self.model = timm.create_model('swin_base_patch4_window7_224.ms_in22k', pretrained=False, features_only=True)
+        self.model = timm.create_model(
+            "swin_base_patch4_window7_224.ms_in22k",
+            pretrained=False,
+            depths=(2, 2, 18, 10),
+            features_only=True,
+        )
         self.model.patch_embed.proj = nn.Conv2d(3, 128, kernel_size=2, stride=2)
 
         out_channels = in_channels * patch_size ** 2
