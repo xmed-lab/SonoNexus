@@ -1,261 +1,232 @@
-<div style="display: flex; align-items: center; justify-content: center;">
-  <!--<img src="Hulu-Med.png" width="50" style="margin-right: 15px; flex-shrink: 0;">-->
-  <h1 style="margin: 0; text-align: left;">
-    SonoNexus: A Universal Foundation Model for Sensor-Agnostic Ultrasound Imaging
-  </h1>
+<div align="center">
+  <h1>SonoNexus</h1>
+  <h3>A Universal Foundation Model for Sensor-Agnostic Ultrasound Imaging</h3>
+
+  <p>
+    <b>Unified ultrasound representation</b> ·
+    <b>Masked image reconstruction</b> ·
+    <b>Downstream clinical transfer</b>
+  </p>
+
+  <p>
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#pre-training">Pre-training</a> ·
+    <a href="#downstream-demos">Downstream Demos</a> ·
+    <a href="#feature-visualization">Feature Visualization</a>
+  </p>
 </div>
-
-
-
-## 🔥 News
-- **[2025-11]** Setup the GitHub project of SonoNexus!!!
-
-## 📖 Overview
-
-SonoNexus is a foundation model-powered sensing system that acts as a **hardware-agnostic Rosetta Stone** for interpreting images across the entire sensor landscape. It is built upon two cornerstone contributions. First, we construct **Sono-21M**, the largest and most diverse ultrasound dataset to date, comprising 21.14 million images of 20 major organ types. Purposefully curated from 10 distinct mainstream sensor models across 17 hospitals. Second, we developed SonoNexus via a self-supervised learning strategy, enabling seamless performance across a broad spectrum of devices and downstream clinical applications.
 
 <div align="center">
-<img src="./imgs/Figure 1-dataset1.png" width="70%">
+  <img src="./imgs/Figure 1-dataset1.png" width="78%" alt="SonoNexus dataset overview">
 </div>
 
+## Highlights
 
-## 📊 Pre-Training towards Unified Representation for US Imaging
+SonoNexus is a foundation model for ultrasound images across heterogeneous scanners, hospitals, organs, and clinical tasks. It is designed as a sensor-agnostic representation learner: a single pre-trained model can be transferred to view classification, disease diagnosis, organ segmentation, and detection-style downstream workflows.
 
-Here, we provide the inference codes to show the effectivenss of the [pre-trained models](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link) on reconstructing the masked US images and capturing the discriminative features.
-<div align="center", style="display: flex; justify-content: center;">
-  <img src="./imgs/visualization_similarity1.png" style="width:34%; margin-right:1%;">
-  <img src="./imgs/visualization_similarity.png" style="width:34%;">
+| Component | Status | Entry point |
+| --- | --- | --- |
+| MAE-style ultrasound pre-training | Available | `main_mae_cnn.py`, `train_mae_cnn.py` |
+| Mask generation and augmentation | Available | `dataset_mae_cnn.py` |
+| SonoNexus backbone | Available | `model/swin.py` |
+| Pre-trained checkpoint loader | Available | `load_model.py` |
+| Downstream classification demo | Available | `downstream/train_classification_demo.py` |
+| Downstream diagnosis demo | Available | `downstream/train_diagnosis_demo.py` |
+| Downstream segmentation demo | Available | `downstream/train_segmentation_demo.py` |
+| Feature and reconstruction visualization | Available | `tools/visualize_pretrained_features.py` |
+
+## News
+
+- **2025-11**: Initial SonoNexus project setup.
+- **2026-06**: Added downstream training demos and a polished feature visualization toolkit.
+
+## Overview
+
+SonoNexus is built around two central ideas:
+
+1. **Sono-21M scale**: a large ultrasound corpus with 21.14M images, 20 major organ types, 10 mainstream sensor models, and multi-center acquisition across 17 hospitals.
+2. **Self-supervised transfer**: masked ultrasound reconstruction and contrastive regularization encourage robust anatomical features that can transfer across scanners and tasks.
+
+<div align="center">
+  <img src="./imgs/pipe.jpg" width="58%" alt="SonoNexus training pipeline">
 </div>
 
-Detailed feature visualization and image inference codes are define in test_model.py. To calculate the activation maps, we provide two query anchors, including max-pooled token and average-pooled token among patch tokens.
+## Quick Start
 
-```Python
-import torch
-import torch.nn.functional as F
-from load_model import VisionUlt
-import os
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
-from dataset import get_data
+Install the usual PyTorch vision stack first. The code relies on `torch`, `torchvision`, `timm`, `tqdm`, `matplotlib`, `Pillow`, `numpy`, `pyyaml`, `wandb`, and `tensorboard`.
 
-# Set device
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# ==========================================
-# 1. Helper Functions
-# ==========================================
-
-def denormalize(img_tensor):
-    """
-    Convert an ImageNet-standardized tensor back to a 0-255 numpy array (H, W, C)
-    """
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(img_tensor.device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(img_tensor.device)
-    
-    img = img_tensor * std + mean
-    img = torch.clamp(img, 0, 1)
-    img = img.permute(1, 2, 0).cpu().detach().numpy()
-    return (img * 255).astype(np.uint8)
-
-def compute_similarity_heatmap(feats, img_size, pool_type='avg'):
-    """
-    Compute a cosine similarity heatmap between feature maps and global features
-    
-    Args:
-        feats: [B, H, W, C] Input features
-        img_size: (Target_H, Target_W) Original image size
-        pool_type: 'avg' (average pooling) or 'max' (max pooling)
-    """
-    B, H, W, C = feats.shape
-    
-    # 1. Compute global feature vector
-    # Perform pooling on spatial dimensions (H, W), i.e., dimensions 1 and 2
-    if pool_type == 'avg':
-        # [B, H, W, C] -> [B, 1, 1, C]
-        global_feat = feats.mean(dim=(1, 2), keepdim=True)
-    elif pool_type == 'max':
-        # [B, H, W, C] -> [B, C] -> [B, 1, 1, C]
-        # torch.amax supports multi-dimension max
-        global_feat = torch.amax(feats, dim=(1, 2), keepdim=True)
-    else:
-        raise ValueError("pool_type must be 'avg' or 'max'")
-        
-    # 2. Compute cosine similarity
-    # feats:       [B, H, W, C]
-    # global_feat: [B, 1, 1, C]
-    # F.cosine_similarity automatically broadcasts and computes along dim=-1 (channel)
-    similarity_map = F.cosine_similarity(feats, global_feat, dim=-1) # Result: [B, H, W]
-    
-    # 3. Upsample to original image size
-    # Interpolation requires [B, C, H, W] format, where C=1
-    similarity_map = similarity_map.unsqueeze(1) # [B, 1, H, W]
-    similarity_map = F.interpolate(similarity_map, size=img_size, mode='bilinear', align_corners=False)
-    similarity_map = similarity_map.squeeze(1)   # [B, Target_H, Target_W]
-    
-    return similarity_map
-
-def apply_heatmap_overlay(img_rgb, heatmap_tensor):
-    """
-    Overlay a heatmap on the original image
-    """
-    # Convert to numpy
-    heatmap_np = heatmap_tensor.cpu().detach().numpy()
-    
-    # Normalize (Min-Max) to 0-1
-    # Cosine similarity range is typically [-1, 1], so we map it to the visualization range
-    heatmap_np = heatmap_np - np.min(heatmap_np)
-    heatmap_np = heatmap_np / (np.max(heatmap_np) + 1e-8)
-    
-    # Convert to pseudo-color
-    heatmap_uint8 = (heatmap_np * 255).astype(np.uint8)
-    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-    
-    # Overlay
-    overlay = cv2.addWeighted(img_rgb, 0.6, heatmap_color, 0.4, 0)
-    
-    return heatmap_color, overlay
-
-# ==========================================
-# 2. Model Loading
-# ==========================================
-
-path = "your_downloaded_pth_file"
-
-model = VisionUlt().to(device)
-checkpoint = torch.load(path, map_location=device)
-state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
-model.load_state_dict(state_dict, strict=False)
-model.eval()
-
-print("Model loaded successfully.")
-
-dataloader = get_data(data_root="your_test_images", batch_size=4)
-
-# ==========================================
-# 3. Main Loop and Visualization
-# ==========================================
-
-for data in dataloader:
-    image, mask, _ = data
-    image = image.to(device)
-    mask = mask.to(device)
-    
-    # Inference
-    with torch.no_grad():
-        image_recon = model(image, mask)
-        # Get features: [B, H, W, C]
-        feats = model.model(image * (1 - mask))[3]
-        feats = model.merge(feats)
-    
-    print(f"Feats shape: {feats.shape}") 
-
-    mse = ((image_recon - image) ** 2).mean()
-    print(f"mse is {mse}")
-
-    # Prepare data for visualization
-    batch_size = image.shape[0]
-    img_h, img_w = image.shape[2], image.shape[3]
-    
-    # --- Core modification: compute similarity heatmap ---
-    # You can choose pool_type='avg' or 'max'
-    heatmaps_resized = compute_similarity_heatmap(feats, (img_h, img_w), pool_type='max')
-    
-    # Create canvas
-    fig, axs = plt.subplots(batch_size, 4, figsize=(16, 4 * batch_size))
-    if batch_size == 1: axs = axs[None, :]
-    
-    for i in range(batch_size):
-        # 1. Original Image
-        img_orig = denormalize(image[i])
-        img_recon = denormalize(image_recon[i])
-        
-        # 2. Masked Image
-        mask_np = mask[i].permute(1, 2, 0).cpu().detach().numpy()
-        img_masked = img_orig * (1 - mask_np)
-        img_masked = img_masked.astype(np.uint8)
-        
-        # 3. Similarity Heatmap & Overlay
-        heatmap_vis, overlay_vis = apply_heatmap_overlay(img_orig, heatmaps_resized[i])
-        
-        # --- Plot ---
-        axs[i, 0].imshow(img_orig)
-        axs[i, 0].set_title("Original Image")
-        axs[i, 0].axis('off')
-        
-        axs[i, 1].imshow(img_masked)
-        axs[i, 1].set_title("Masked Input")
-        axs[i, 1].axis('off')
-        
-        axs[i, 2].imshow(img_recon)
-        axs[i, 2].set_title("Recon Image")
-        axs[i, 2].axis('off')
-        
-        axs[i, 3].imshow(overlay_vis)
-        axs[i, 3].set_title("Overlay")
-        axs[i, 3].axis('off')
-
-    plt.tight_layout()
-    save_path = "visualization_similarity.png"
-    plt.savefig(save_path)
-    print(f"Visualization saved to {save_path}")
-    
-    break
+```bash
+python main_mae_cnn.py \
+  -data /path/to/pretraining/images \
+  --batch_size 64 \
+  --epochs 300 \
+  --imgsize 224 \
+  --gpus 0
 ```
 
+The pre-training dataset is expected to be an image folder. `dataset_mae_cnn.py` recursively scans common image extensions and creates random block masks for MAE reconstruction.
 
-**If ones are willing to pre-train SonoNexus on in-house datasets, please refer**:
+## Pre-training
 
-### 1. Data Preparation
+The pre-training model is implemented in `model/swin.py`.
 
-  <div align="center">
-  <img src="./imgs/pipe.jpg" width="50%">
-  </div>
+- **Backbone**: Swin Transformer from `timm`, configured as a feature extractor.
+- **Objective 1**: masked image reconstruction on ultrasound patches.
+- **Objective 2**: contrastive alignment between full-image and masked-image global features.
+- **Training loop**: `train_mae_cnn.py` with TensorBoard/W&B logging and reconstruction previews.
 
-The training and testing datasets are defined in ./dataset_mae_cnn.py, with the data pre-processing augmentation pipeline and masking strategy.
-Our in-house pre-trained data consists of a large-scale dataset of **21,140,761** covering **20
-major organs**, enabling comprehensive model training and evaluation, collected from 10 types of ultrasound equipment/sensors.
+Pre-trained model weights can be downloaded from:
+[Google Drive checkpoint folder](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link)
 
-### 2. Model Architecture
+For downstream transfer and visualization, use the checkpoint-loading architecture in `load_model.py`. It matches the released inference model with `depths=(2, 2, 18, 10)`, the `ReLU + Linear` reconstruction head, and the `merge` projection for feature maps.
 
-The model is in ./model/swin.py, including the model definition, masked image reconstruction loss and contrastive loss.
+```bash
+python load_model.py \
+  --checkpoint /path/to/timm_model_99.pth \
+  --output /path/to/epochs.pth
+```
 
-### 3. Training Pipeline
+<div align="center">
+  <img src="./imgs/visualization_similarity1.png" width="36%" alt="SonoNexus reconstruction visualization">
+  <img src="./imgs/visualization_similarity.png" width="36%" alt="SonoNexus similarity visualization">
+</div>
 
-The training process is in ./train_mae_cnn.py and the running file is ./main_mae_cnn.py
+## Downstream Demos
 
+The repository now provides three clean demo trainers. Dataset definitions are intentionally lightweight: each script contains a `build_train_loader(args)` function and a dummy dataset so the training loop can be smoke-tested immediately. Replace that function with your real dataset when ready.
 
+### 1. Fetal View / General Classification
 
-## 📋 Supported Tasks
+Use this for mutually exclusive classes such as fetal ultrasound view classification or organ category classification.
 
-- ✅ Fetal ultrasound view classification
-  <div align="center">
-  <img src="./imgs/vc.jpg" width="50%">
-  </div>
-- ✅ Organ segmentation
-  <div align="center">
-  <img src="./imgs/os.jpg" width="50%">
-  </div>
-- ✅ Anatomical structure detection
-  <div align="center">
-  <img src="./imgs/dt.jpg" width="50%">
-  </div>
-- ✅ Disease classification
-  <div align="center">
-  <img src="./imgs/ds.jpg" width="50%">
-  </div>
+```bash
+python downstream/train_classification_demo.py \
+  --checkpoint /path/to/sononexus_pretrained.pth \
+  --num-classes 5 \
+  --batch-size 8 \
+  --epochs 2
+```
 
-When pre-trained period is finised, ones can easily transfer the model into diverse down-stream tasks for US images. In the main paper, we focus on four tasks, inclduing fetal ultrasound view classification, organ segmentation, anatomical structure detection and disease classification.
+Loss: `CrossEntropyLoss`
 
+<div align="center">
+  <img src="./imgs/vc.jpg" width="52%" alt="Fetal view classification">
+</div>
 
+### 2. Disease Diagnosis
 
+Use this for binary or multi-label disease diagnosis. The demo head produces `num_labels` logits and trains with `BCEWithLogitsLoss`.
 
+```bash
+python downstream/train_diagnosis_demo.py \
+  --checkpoint /path/to/sononexus_pretrained.pth \
+  --num-labels 4 \
+  --batch-size 8 \
+  --epochs 2
+```
 
+Loss: `BCEWithLogitsLoss`
 
-## 📜 License
+<div align="center">
+  <img src="./imgs/ds.jpg" width="52%" alt="Disease classification">
+</div>
 
-This project is released under the [Apache 2.0 License](LICENSE).
+### 3. Organ / Lesion Segmentation
 
----
+Use this for binary masks or multi-class masks. The demo attaches a compact decoder to the SonoNexus backbone and upsamples logits to the input image size.
+
+```bash
+python downstream/train_segmentation_demo.py \
+  --checkpoint /path/to/sononexus_pretrained.pth \
+  --num-classes 1 \
+  --batch-size 4 \
+  --epochs 2
+```
+
+Loss:
+
+- `BCEWithLogitsLoss + Dice loss` for `--num-classes 1`
+- `CrossEntropyLoss` for `--num-classes > 1`
+
+<div align="center">
+  <img src="./imgs/os.jpg" width="52%" alt="Organ segmentation">
+</div>
+
+## Feature Visualization
+
+`tools/visualize_pretrained_features.py` provides a complete visualization workflow for pre-trained SonoNexus checkpoints:
+
+- masked-input reconstruction preview
+- average-pooled token similarity map
+- max-pooled token similarity map
+- PCA projection of global image embeddings
+- CSV export of embedding coordinates
+
+```bash
+python tools/visualize_pretrained_features.py \
+  --image-dir /path/to/ultrasound/images \
+  --checkpoint /path/to/sononexus_pretrained.pth \
+  --output-dir outputs/feature_visualization \
+  --anchor both \
+  --max-images 128
+```
+
+Outputs:
+
+| File | Description |
+| --- | --- |
+| `feature_gallery.png` | Original, masked input, reconstruction, and similarity overlays |
+| `embedding_pca.png` | 2D PCA view of SonoNexus global features |
+| `embedding_pca.csv` | Image path, folder label, PC1, and PC2 |
+
+If images are arranged as `root/class_name/image.png`, parent folder names are used as labels in the PCA plot. If images are placed directly under one folder, they are treated as `unlabeled`.
+
+## Supported Clinical Tasks
+
+| Task | Typical head | Demo |
+| --- | --- | --- |
+| Fetal ultrasound view classification | pooled feature + linear classifier | `train_classification_demo.py` |
+| Disease classification / diagnosis | pooled feature + multi-label classifier | `train_diagnosis_demo.py` |
+| Organ or lesion segmentation | compact decoder + upsampling head | `train_segmentation_demo.py` |
+| Anatomical structure detection | detector head on SonoNexus features | planned |
+
+<div align="center">
+  <img src="./imgs/dt.jpg" width="52%" alt="Anatomical structure detection">
+</div>
+
+## Repository Layout
+
+```text
+SonoNexus-main/
+├── dataset_mae_cnn.py                    # Pre-training image loader and mask generator
+├── main_mae_cnn.py                       # Pre-training launch script
+├── train_mae_cnn.py                      # Pre-training loop and logging
+├── load_model.py                         # Released checkpoint loader/converter
+├── model/
+│   ├── swin.py                           # SonoNexus MAE backbone
+│   ├── mednext.py                        # MedNeXt encoder experiments
+│   └── vqvae.py
+├── downstream/
+│   ├── common.py                         # Shared downstream model heads/utilities
+│   ├── train_classification_demo.py      # Multi-class classification demo
+│   ├── train_diagnosis_demo.py           # Multi-label diagnosis demo
+│   └── train_segmentation_demo.py        # Binary/multi-class segmentation demo
+├── tools/
+│   └── visualize_pretrained_features.py  # Reconstruction and feature visualization
+└── imgs/                                 # README figures
+```
+
+## Notes for Custom Datasets
+
+To connect private datasets, edit only the `build_train_loader(args)` function in the corresponding downstream demo. The model expects normalized RGB tensors shaped `[B, 3, H, W]`. For ultrasound grayscale images, convert to RGB by channel repetition or `PIL.Image.convert("RGB")` before normalization.
+
+Recommended normalization is the ImageNet convention already used by pre-training:
+
+```python
+mean = [0.485, 0.456, 0.406]
+std = [0.229, 0.224, 0.225]
+```
+
+## License
+
+This project is released under the Apache 2.0 License.
