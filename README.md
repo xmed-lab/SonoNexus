@@ -79,7 +79,7 @@ The pre-training model is implemented in `model/swin.py`.
 Pre-trained model weights can be downloaded from:
 [Google Drive checkpoint folder](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link)
 
-For downstream transfer and visualization, use the checkpoint-loading architecture in `load_model.py`. It matches the released inference model with `depths=(2, 2, 18, 10)`, the `ReLU + Linear` reconstruction head, and the `merge` projection for feature maps.
+For downstream transfer and visualization, use the checkpoint-loading architecture in `load_model.py`. 
 
 ```bash
 python load_model.py \
