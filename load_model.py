@@ -42,7 +42,7 @@ class VisionUlt(nn.Module):
             nn.Linear(512, out_channels, bias=True),
         )
         self.merge = nn.Sequential(
-            nn.Linear(1024, 768),
+            nn.Linear(768, 768),
         )
 
     def forward(self, x, mask):
