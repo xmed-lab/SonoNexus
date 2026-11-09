@@ -18,26 +18,34 @@ def get_all_image_paths(root_folder):
                 image_paths.append(os.path.join(dirpath, filename))
     return image_paths
 
-def get_transform(img_size):
+def get_transform(img_size, blur_probability=0.5):
     return transforms.Compose([
-                transforms.RandomResizedCrop(img_size, scale=(0.16, 1.0), ratio=(4/5, 5/4), interpolation=3),  
-                transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(img_size, scale=(0.2, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomApply([transforms.GaussianBlur(23, sigma=(0.1, 2.0))], p=blur_probability),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                 ])
 
 
 class Mask_Dataset(Dataset):
-    def __init__(self, img_dir='/public/LLM/Videos', transform=None, upper_ratio=0.8, lower_ratio=0.5, block_size=8, img_size=224):
+    def __init__(self, img_dir='/public/LLM/Videos', transform=None, upper_ratio=0.8, lower_ratio=0.1, block_size=8, img_size=224, second_transform=None):
 
         print("lower ratio {}; upper ratio {}; block size {}; img size {} of Datsets".format(lower_ratio, upper_ratio, block_size, img_size))
 
         self.img_dir = img_dir
         self.transform = transform
+        self.second_transform = second_transform
+        if img_size % block_size or not 0 < lower_ratio <= upper_ratio < 1:
+            raise ValueError("Image size must divide into blocks, and 0 < mask_min <= mask_max < 1.")
         self.upper_ratio = upper_ratio
         self.lower_ratio = lower_ratio
         self.block_size = block_size
-        self.img_labels = get_all_image_paths(img_dir)
+        self.img_labels = sorted(get_all_image_paths(img_dir))
+        if not self.img_labels:
+            raise FileNotFoundError(f"No pretraining images found in {img_dir}")
         
         self.num_blocks_vertical = img_size // block_size
         self.num_blocks_horizontal = img_size // block_size
@@ -67,28 +75,35 @@ class Mask_Dataset(Dataset):
     def __getitem__(self, idx):
         
         img_name = os.path.join(self.img_labels[idx])
-        image = Image.open(img_name).convert("RGB")
+        with Image.open(img_name) as source:
+            image = source.convert("RGB")
+        second_view = self.second_transform(image) if self.second_transform else None
         if self.transform:
             image = self.transform(image)
 
         mask, _ = self.generate_mask()
         
-        return image, mask, _
+        views = (image, second_view) if second_view is not None else image
+        return views, mask, _
 
 
-def get_data(data_root="/public/LLM/Videos", batch_size=2, num_workers=4, img_size=224, patch_size=8):
-    trans = get_transform(img_size=img_size)
-    set_ = Mask_Dataset(data_root, trans, img_size=img_size, block_size=patch_size)
+def get_data(data_root="/public/LLM/Videos", batch_size=2, num_workers=4, img_size=224, patch_size=8,
+             lower_ratio=0.1, upper_ratio=0.8, two_views=True):
+    trans = get_transform(img_size=img_size, blur_probability=0.5)
+    second = get_transform(img_size=img_size, blur_probability=0.1) if two_views else None
+    set_ = Mask_Dataset(data_root, trans, img_size=img_size, block_size=patch_size,
+                        lower_ratio=lower_ratio, upper_ratio=upper_ratio, second_transform=second)
 
     print("The total number of images if {}".format(len(set_)))
 
     shuffle = True
-    return DataLoader(dataset=set_, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    return DataLoader(dataset=set_, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                      pin_memory=torch.cuda.is_available())
 
 if __name__ == "__main__":
     data_root = "/public/LLM/Videos"
     batch_size = 32
-    data_loader = get_data(data_root, batch_size, num_workers=1, img_size=224, patch_size=8)
+    data_loader = get_data(data_root, batch_size, num_workers=1, img_size=224, patch_size=8, two_views=False)
     for sample in data_loader:
         images, masks, ratios = sample
         print(images.size(), masks.size(), images.min(), images.max())

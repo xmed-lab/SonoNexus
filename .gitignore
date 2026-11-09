@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local datasets, model weights and generated experiment artifacts.
+datasets/
+checkpoints/
+runs/
+outputs/
+wandb/
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.safetensors
+
+# Local environment credentials.
+.env
+.env.*
+!.env.example

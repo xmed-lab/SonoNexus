@@ -1,117 +1,90 @@
+"""Shared SonoNexus architecture for pretraining, inference and transfer."""
+
 import timm
-from timm.models.vision_transformer import Block
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import warnings
+from timm.models.vision_transformer import Block
+
+# The main model retains the standard Swin-B stage depths.
+ENCODER_DEPTHS = (2, 2, 18, 2)
+ENCODER_CHANNELS = (128, 256, 512, 1024)
+EMBED_PATCH_SIZE = 2
+RECON_PATCH_SIZE = 8
+
+
+def build_encoder(img_size=224, in_channels=3):
+    """Build the pretraining encoder without allocating a reconstruction decoder."""
+    if img_size % 16:
+        raise ValueError("Image size must be divisible by the encoder output stride (16).")
+    # Preserve the original checkpoint-producing construction exactly: create
+    # patch4 first, then replace only the projection. Do not recompute grids,
+    # stage resolutions or window/shift settings when loading existing weights.
+    encoder = timm.create_model(
+        "swin_base_patch4_window7_224.ms_in22k",
+        pretrained=False, features_only=True, img_size=img_size,
+        in_chans=in_channels, depths=ENCODER_DEPTHS,
+    )
+    encoder.patch_embed.proj = nn.Conv2d(in_channels, 128, kernel_size=2, stride=2)
+    return encoder
+
 
 def info_nce_loss(feature1, feature2, temperature=0.07):
-    """
-    计算 InfoNCE Loss
-    feature1: 原始特征，形状为 (batch_size, feature_dim)
-    feature2: 增强特征，形状为 (batch_size, feature_dim)
-    temperature: 温度参数，控制对比学习的难度
-    """
-    # 将特征进行 L2 归一化
     feature1 = F.normalize(feature1, dim=1)
     feature2 = F.normalize(feature2, dim=1)
-
-    # 计算相似度矩阵
-    similarity_matrix = torch.matmul(feature1, feature2.T) / temperature  # 形状为 (batch_size, batch_size)
-
-    # 构造标签，正样本的位置
-    batch_size = feature1.size(0)
-    labels = torch.arange(batch_size).to(similarity_matrix.device)  # 形状为 (batch_size)
-
-    # 计算 InfoNCE Loss
-    loss = F.cross_entropy(similarity_matrix, labels)
-    return loss
+    logits = feature1 @ feature2.T / temperature
+    return F.cross_entropy(logits, torch.arange(len(feature1), device=logits.device))
 
 
 class VisionUlt(nn.Module):
-
-    def __init__(self, 
-        in_channels: int = 3, 
-        img_size: int = 224,
-        patch_size: int = 8,
-    ):
-
+    def __init__(self, in_channels=3, img_size=224, patch_size=8, temperature=0.07):
         super().__init__()
+        if patch_size != RECON_PATCH_SIZE:
+            raise ValueError("Stage-3 reconstruction requires an 8x8 output patch.")
+        self.in_channels = in_channels
         self.patch_size = patch_size
-        print("swin")
-        self.model = timm.create_model(
-            "swin_base_patch4_window7_224.ms_in22k",
-            pretrained=False,
-            depths=(2, 2, 18, 10),
-            features_only=True,
-        )
-        self.model.patch_embed.proj = nn.Conv2d(3, 128, kernel_size=2, stride=2)
-
-        out_channels = in_channels * patch_size ** 2
-        decoder_depth = 4
+        self.temperature = temperature
+        self.model = build_encoder(img_size, in_channels)
         self.decoder_blocks = nn.Sequential(*[
             Block(512, 8, mlp_ratio=4.0, qkv_bias=True, norm_layer=nn.LayerNorm)
-            for i in range(decoder_depth)])
+            for _ in range(4)
+        ])
+        self.decoder_fc = nn.Linear(512, in_channels * patch_size ** 2, bias=True)
 
-        self.merge = nn.Sequential(
-                nn.Linear(768, 768)   # Base 768; large: 1024
-            )
-        
-        self.decoder_fc = nn.Linear(512, out_channels, bias=True) 
+    def decode(self, stage3):
+        batch, height, width, dim = stage3.shape
+        tokens = stage3.reshape(batch, height * width, dim)
+        pixels = self.decoder_fc(self.decoder_blocks(tokens))
+        return self.unpatchify(pixels, height, width)
 
-    def forward(self, x, mask):
-        x_mask = x * (1 - mask)
+    def reconstruct(self, x, mask):
+        return self.decode(self.model(x * (1 - mask))[2])
 
-        f = self.model(x)
-        f3 = f[3].permute(0, 3, 1, 2)
+    def forward(self, x, mask, masked_view=None):
+        # The masked branch reconstructs its own augmentation; CL pairs the views.
+        # Omitting masked_view preserves the original full/masked input interface.
+        target = x if masked_view is None else masked_view
+        full_features = self.model(x)
+        masked_features = self.model(target * (1 - mask))
+        reconstruction = self.decode(masked_features[2])
+        loss_mask, loss_visible = self.forward_reconloss(target, reconstruction, mask)
+        # Average tokens are the global/class representations used for CL.
+        full_global = full_features[3].mean(dim=(1, 2))
+        masked_global = masked_features[3].mean(dim=(1, 2))
+        loss_cl = info_nce_loss(full_global, masked_global, self.temperature)
+        return reconstruction, loss_mask, loss_visible, loss_cl
 
-        f_mask = self.model(x_mask)
-        f2_mask, f3_mask = f_mask[2], f_mask[3].permute(0, 3, 1, 2)
+    @staticmethod
+    def forward_reconloss(x, reconstruction, mask):
+        error = (x - reconstruction).abs().mean(dim=1)
+        masked = mask[:, 0]
+        visible = 1 - masked
+        return (
+            (error * masked).sum() / masked.sum().clamp_min(1),
+            (error * visible).sum() / visible.sum().clamp_min(1),
+        )
 
-        ### MAE recon
-        batch_size, self.h, self.w, dim = f2_mask.size()
-        f_up_mask = self.decoder_fc(self.decoder_blocks(f2_mask.reshape(batch_size, self.h*self.w, dim)))
-        x_recon = self.unpatchify(f_up_mask)
-        #print(x_recon.size())
-        loss_mask, loss_unmask = self.forward_reconloss(x, x_recon, mask)
-        #print(loss_mask, loss_unmask)
-
-        ### Contrastive Learning
-        f3 = F.avg_pool2d(f3, kernel_size=(14, 14))
-        f3 = f3.squeeze(-1).squeeze(-1)
-        f3 = self.merge(f3)
-
-        f3_mask = F.avg_pool2d(f3_mask, kernel_size=(14, 14))
-        f3_mask = f3_mask.squeeze(-1).squeeze(-1)
-        f3_mask = self.merge(f3_mask)
-
-        loss_cl = info_nce_loss(f3, f3_mask)
-        #print(loss_cl)
-        return x_recon, loss_mask, loss_unmask, loss_cl
-
-    def forward_reconloss(self, x, x_out, mask):
-        loss = torch.abs(x - x_out) #** 2
-        loss = loss.mean(1)
-
-        loss_mask = (loss * mask[:,0,:,:]).sum() / mask[:,0,:,:].sum()
-        loss_unmask = (loss * (1-mask[:,0,:,:])).sum() / (1-mask[:,0,:,:]).sum()
-
-        return loss_mask, loss_unmask
-
-    def unpatchify(self, x):
-        x = x.reshape(shape=(x.shape[0], self.h, self.w, self.patch_size, self.patch_size, 3))
-        x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 3, self.h*self.patch_size, self.w*self.patch_size))
-        return imgs
-
-if __name__ == '__main__':
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=UserWarning)
-
-    x = torch.randn(3, 3, 224, 224)
-    mask = torch.randint(0, 2, (3, 1, 224, 224)).float()
-
-    model = VisionUlt()
-    x_recon, loss1, loss_2, loss_3 = model(x, mask)
-    print(loss1, loss_2, loss_3)
-    print(x_recon.size())
+    def unpatchify(self, x, height, width):
+        x = x.reshape(x.shape[0], height, width, self.patch_size, self.patch_size, self.in_channels)
+        x = torch.einsum("nhwpqc->nchpwq", x)
+        return x.reshape(x.shape[0], self.in_channels, height * self.patch_size, width * self.patch_size)

@@ -10,14 +10,11 @@
 
   <p>
     <a href="#quick-start">Quick Start</a> ·
+    <a href="#demo-data-for-fast-implementation">Demo Data</a> ·
     <a href="#pre-training">Pre-training</a> ·
     <a href="#downstream-demos">Downstream Demos</a> ·
     <a href="#feature-visualization">Feature Visualization</a>
   </p>
-</div>
-
-<div align="center">
-  <img src="./imgs/Figure 1-dataset1.png" width="78%" alt="SonoNexus dataset overview">
 </div>
 
 ## Highlights
@@ -45,46 +42,79 @@ SonoNexus is a foundation model for ultrasound images across heterogeneous scann
 
 SonoNexus is built around two central ideas:
 
-1. **Sono-21M scale**: a large ultrasound corpus with 21.14M images, 20 major organ types, 10 mainstream sensor models, and multi-center acquisition across 17 hospitals.
+1. **Sono-21M scale**: a large ultrasound corpus with 21.14M images, 20 major organ types, 10 mainstream sensor models, and multi-center acquisition across 13 hospitals.
 2. **Self-supervised transfer**: masked ultrasound reconstruction and contrastive regularization encourage robust anatomical features that can transfer across scanners and tasks.
 
 <div align="center">
-  <img src="./imgs/pipe.jpg" width="58%" alt="SonoNexus training pipeline">
+  <img src="./imgs/dataset-analysis.jpg" width="90%" alt="SonoNexus dataset distribution across medical centers and organs">
 </div>
 
 ## Quick Start
 
-Install the usual PyTorch vision stack first. The code relies on `torch`, `torchvision`, `timm`, `tqdm`, `matplotlib`, `Pillow`, `numpy`, `pyyaml`, `wandb`, and `tensorboard`.
+Install dependencies with `python -m pip install -r requirements.txt`. The source was checked on macOS with PyTorch 2.15.0, torchvision 0.29.2 and timm 1.0.31. CUDA training uses FP16; CPU execution disables CUDA AMP.
 
 ```bash
 python main_mae_cnn.py \
   -data /path/to/pretraining/images \
-  --batch_size 64 \
+  --batch_size 512 \
   --epochs 300 \
   --imgsize 224 \
-  --gpus 0
+  --gpus 0,1,2,3
 ```
 
 The pre-training dataset is expected to be an image folder. `dataset_mae_cnn.py` recursively scans common image extensions and creates random block masks for MAE reconstruction.
+
+## Demo Data for Fast Implementation
+
+### Pre-training
+
+Unlabeled ultrasound images for self-supervised masked image reconstruction and contrastive learning. Use `main_mae_cnn.py` as the training entry point.
+
+**Download:** To be added.
+
+### SFT-Segmentation
+
+Ultrasound images paired with pixel-wise segmentation masks for organ and lesion segmentation. Use `train_segmentation_demo.py` as the training entry point.
+
+**Download:** To be added.
+
+### SFT-Classification
+
+Ultrasound images with class labels for view and organ classification. Use `train_classification_demo.py` as the training entry point.
+
+**Download:** To be added.
+
+### SFT-Detection
+
+Ultrasound images with bounding-box annotations and class labels for anatomical structure detection.
+
+**Download:** To be added.
 
 ## Pre-training
 
 The pre-training model is implemented in `model/swin.py`.
 
-- **Backbone**: Swin Transformer from `timm`, configured as a feature extractor.
+- **Backbone**: Swin-B from `timm`, trained from scratch, main-model depths `(2, 2, 18, 2)` (24 blocks), 2x2 patch embedding and feature channels `(128, 256, 512, 1024)`. The original initialization is preserved: create the patch4 model first, then replace only `patch_embed.proj` with `Conv2d(3, 128, kernel_size=2, stride=2)`. Stored patch/grid metadata and window/shift settings retain their original values; this is intentionally different from constructing a native patch2 model.
 - **Objective 1**: masked image reconstruction on ultrasound patches.
-- **Objective 2**: contrastive alignment between full-image and masked-image global features.
+- **Objective 2**: contrastive alignment of average-pooled final-stage features from a full augmented view and a masked second augmented view. Reconstruction targets the second view, preserving spatial correspondence.
 - **Training loop**: `train_mae_cnn.py` with TensorBoard/W&B logging and reconstruction previews.
 
 Pre-trained model weights can be downloaded from:
 [Google Drive checkpoint folder](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link)
 
-For downstream transfer and visualization, use the checkpoint-loading architecture in `load_model.py`. 
+`model/swin.py` is the single architecture definition. Stage 3 supplies the reconstruction decoder (four 512-dimensional Transformer blocks, eight heads, a single Linear output, and 8x8 RGB output patches). Stage 4 supplies 1024-dimensional average tokens for contrastive learning. Embedding patches are 2x2; masking and reconstruction patches are 8x8.
+
+Paper pretraining defaults: 224x224 input, 300 epochs, total batch size 512, AdamW betas `(0.9, 0.95)`, weight decay 0.05, and `lr = 1.5e-4 * batch_size / 256` (3e-4 at batch size 512). A 10-epoch linear warm-up precedes cosine decay. `--lr` optionally overrides the scaled learning rate.
+
+Each image produces two independently augmented views: random resized crop (scale 0.2–1.0), horizontal flip (p=0.5), color jitter (0.4/0.4/0.2/0.1, p=0.8), random grayscale (p=0.2), and Gaussian blur (kernel 23, sigma 0.1–2.0; p=0.5/0.1). Mask ratios are uniform in 0.1–0.8. The loss retains the original separately averaged masked/visible L1 terms and InfoNCE (temperature 0.07, contrastive weight 1 by default).
+
+`load_model.py` reuses this architecture for reconstruction and visualization; there is no additional `merge` projection. It checks all model weights. Downstream loading constructs only the encoder, ignores reconstruction weights in full pretraining checkpoints, and strictly validates every encoder key. Reuse the timm version from the original training environment when reproducing published checkpoints; successful state-dict loading alone does not verify non-parameter window/shift behavior. Raw encoder state dicts, full pretraining state dicts and `state_dict`-wrapped checkpoints with optional `module.` prefixes are supported.
 
 ```bash
 python load_model.py \
   --checkpoint /path/to/timm_model_99.pth \
-  --output /path/to/epochs.pth
+  --encoder-only \
+  --output /path/to/encoder.pth
 ```
 
 <div align="center">
@@ -98,10 +128,16 @@ The repository now provides three clean demo trainers in the project root. Each 
 
 - load the SonoNexus pre-trained model
 - freeze the pre-trained backbone weights
-- inject trainable LoRA adapters into Swin linear layers
+- inject trainable LoRA adapters only into the Q and V slices of every fused Swin attention projection; K, attention output, MLP and patch-merging projections remain frozen
 - train only LoRA parameters and the task-specific head/decoder
 
-Dataset definitions are intentionally lightweight: each script contains a `build_train_loader(args)` function and a dummy dataset so the training loop can be smoke-tested immediately. Replace that function with your real dataset when ready.
+Fine-tuning directly builds the same encoder and never allocates or loads the pretraining reconstruction decoder. The segmentation task retains its own task-specific UNet-like decoder.
+
+Paper fine-tuning defaults: LoRA rank 8, alpha 16 and adapter dropout 0; AdamW betas `(0.9, 0.999)`; adapter LR 2e-4 and task-head/segmentation-decoder LR 1e-3; weight decay 0.01; batch size 64; up to 50 epochs; five-epoch linear warm-up then cosine decay; gradient clipping at norm 1.0; label smoothing 0.1. For BCE tasks, smoothing moves targets toward 0.5. Validation macro AUC selects the best checkpoint and stops training after 10 epochs without improvement. Segmentation uses pixel-wise one-vs-rest macro AUC for this stopping rule, matching the current manuscript's AUC criterion.
+
+Dataset definitions are lightweight: replace **both** `build_train_loader(args)` and `build_val_loader(args)` with real patient-disjoint datasets. The provided synthetic validation set is fixed and separate from synthetic training data. `get_finetune_transform` in `finetune_training.py` supplies random resized crop, horizontal flip and normalization, without color jitter or Gaussian blur. For segmentation, apply identical crop/flip parameters to the image and mask and use nearest-neighbor mask interpolation. Each validation class/label must contain both positive and negative examples to calculate AUC.
+
+The commands below override batch size and epoch count for short demo runs. Omitting those flags uses paper defaults.
 
 ### 1. Fetal View / General Classification
 
@@ -214,7 +250,9 @@ SonoNexus-main/
 ├── dataset_mae_cnn.py                    # Pre-training image loader and mask generator
 ├── main_mae_cnn.py                       # Pre-training launch script
 ├── train_mae_cnn.py                      # Pre-training loop and logging
-├── load_model.py                         # Released checkpoint loader/converter
+├── load_model.py                         # Shared model loader and encoder-only export
+├── training_utils.py                     # Linear warm-up and cosine scheduler
+├── finetune_training.py                   # Paper fine-tuning settings and validation/early stopping
 ├── sononexus_downstream.py               # Frozen backbone, LoRA, downstream heads/decoder
 ├── train_classification_demo.py          # LoRA multi-class classification demo
 ├── train_diagnosis_demo.py               # LoRA multi-label diagnosis demo
@@ -229,7 +267,7 @@ SonoNexus-main/
 
 ## Notes for Custom Datasets
 
-To connect private datasets, edit only the `build_train_loader(args)` function in the corresponding downstream demo. The model expects normalized RGB tensors shaped `[B, 3, H, W]`. For ultrasound grayscale images, convert to RGB by channel repetition or `PIL.Image.convert("RGB")` before normalization.
+To connect private datasets, edit the `build_train_loader(args)` and `build_val_loader(args)` functions in the corresponding downstream demo. The model expects normalized RGB tensors shaped `[B, 3, H, W]`. For ultrasound grayscale images, convert to RGB by channel repetition or `PIL.Image.convert("RGB")` before normalization.
 
 Recommended normalization is the ImageNet convention already used by pre-training:
 
@@ -241,3 +279,7 @@ std = [0.229, 0.224, 0.225]
 ## License
 
 This project is released under the Apache 2.0 License.
+
+## Verification
+
+Run `python -m unittest discover -s tests -v` from this directory. Tests verify identical seeded parameters, grids, attention masks, shifts and 224x224 forward outputs against the original main-model initialization with `(2, 2, 18, 2)` depths, and exercise two-view pretraining gradients, strict full/encoder checkpoint loading, rejection of incomplete encoder weights, Q/V-only LoRA updates with an unchanged K slice, the downstream heads, the augmentation/mask pipeline, optimizer groups, warm-up/cosine decay and validation-based early stopping. No pretrained weights or clinical datasets are bundled; synthetic tests validate code behavior, not paper results.

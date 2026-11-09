@@ -1,5 +1,4 @@
 import random
-from pathlib import Path
 from typing import Iterable, Optional, Sequence, Tuple
 
 import numpy as np
@@ -7,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from load_model import VisionUlt, clean_state_dict
+from load_model import load_pretrained_encoder
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -26,56 +25,70 @@ def freeze_module(module: nn.Module) -> None:
         param.requires_grad = False
 
 
-class LoRALinear(nn.Module):
-    """Trainable low-rank adapter around a frozen Linear layer."""
+class LowRankUpdate(nn.Module):
+    """A scaled low-rank update, with no dense base projection of its own."""
 
     def __init__(
         self,
-        base: nn.Linear,
+        in_features: int,
+        out_features: int,
         rank: int = 8,
         alpha: float = 16.0,
-        dropout: float = 0.05,
+        dropout: float = 0.0,
     ):
         super().__init__()
         if rank <= 0:
             raise ValueError("LoRA rank must be positive.")
 
-        self.base = base
-        freeze_module(self.base)
-
         self.rank = rank
         self.alpha = alpha
         self.scale = alpha / rank
         self.dropout = nn.Dropout(dropout)
-        self.lora_a = nn.Linear(base.in_features, rank, bias=False)
-        self.lora_b = nn.Linear(rank, base.out_features, bias=False)
+        self.lora_a = nn.Linear(in_features, rank, bias=False)
+        self.lora_b = nn.Linear(rank, out_features, bias=False)
 
         nn.init.kaiming_uniform_(self.lora_a.weight, a=np.sqrt(5))
         nn.init.zeros_(self.lora_b.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base(x) + self.lora_b(self.dropout(self.lora_a(x))) * self.scale
+        return self.lora_b(self.dropout(self.lora_a(x))) * self.scale
 
 
-def _matches_lora_target(module_name: str, target_keywords: Sequence[str]) -> bool:
-    module_name = module_name.lower()
-    return any(keyword.lower() in module_name for keyword in target_keywords)
+class LoRAQKV(nn.Module):
+    """Adapt only Q and V within timm's fused [Q, K, V] projection."""
+
+    def __init__(self, base, rank=8, alpha=16.0, dropout=0.0):
+        super().__init__()
+        if base.out_features % 3:
+            raise ValueError("Expected a fused QKV projection with three equal output slices.")
+        self.base = base
+        freeze_module(base)
+        dim = base.out_features // 3
+        self.query = LowRankUpdate(base.in_features, dim, rank, alpha, dropout)
+        self.value = LowRankUpdate(base.in_features, dim, rank, alpha, dropout)
+
+    def forward(self, x):
+        query = self.query(x)
+        value = self.value(x)
+        return self.base(x) + torch.cat((query, torch.zeros_like(query), value), dim=-1)
 
 
 def inject_lora(
     module: nn.Module,
     rank: int = 8,
     alpha: float = 16.0,
-    dropout: float = 0.05,
-    target_keywords: Sequence[str] = ("qkv", "proj", "fc1", "fc2", "reduction"),
+    dropout: float = 0.0,
+    target_keywords: Sequence[str] = ("qkv",),
     prefix: str = "",
 ) -> int:
-    """Recursively replace selected frozen Linear layers with LoRA adapters."""
+    """Attach Q/V-only adapters; K, output projections and MLPs stay frozen."""
+    if tuple(target_keywords) != ("qkv",):
+        raise ValueError("The paper configuration adapts only the Q/V slices of qkv.")
     injected = 0
     for child_name, child in list(module.named_children()):
         full_name = f"{prefix}.{child_name}" if prefix else child_name
-        if isinstance(child, nn.Linear) and _matches_lora_target(full_name, target_keywords):
-            setattr(module, child_name, LoRALinear(child, rank=rank, alpha=alpha, dropout=dropout))
+        if isinstance(child, nn.Linear) and child_name == "qkv":
+            setattr(module, child_name, LoRAQKV(child, rank=rank, alpha=alpha, dropout=dropout))
             injected += 1
         else:
             injected += inject_lora(
@@ -94,25 +107,15 @@ def load_frozen_lora_backbone(
     device: torch.device,
     lora_rank: int = 8,
     lora_alpha: float = 16.0,
-    lora_dropout: float = 0.05,
-    lora_targets: Sequence[str] = ("qkv", "proj", "fc1", "fc2", "reduction"),
+    lora_dropout: float = 0.0,
+    lora_targets: Sequence[str] = ("qkv",),
+    img_size: int = 224,
 ) -> nn.Module:
     """Load SonoNexus, freeze the pre-trained backbone, then attach LoRA."""
-    mae = VisionUlt()
-
-    if checkpoint:
-        checkpoint_path = Path(checkpoint)
-        payload = torch.load(checkpoint_path, map_location="cpu")
-        state_dict = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
-        missing, unexpected = mae.load_state_dict(clean_state_dict(state_dict), strict=False)
-        print(
-            f"Loaded checkpoint: {checkpoint_path} "
-            f"(missing={len(missing)}, unexpected={len(unexpected)})"
-        )
-    else:
+    backbone = load_pretrained_encoder(checkpoint, img_size=img_size)
+    if not checkpoint:
         print("No checkpoint was provided; using randomly initialized SonoNexus weights.")
 
-    backbone = mae.model
     freeze_module(backbone)
     injected = inject_lora(
         backbone,
@@ -121,7 +124,7 @@ def load_frozen_lora_backbone(
         dropout=lora_dropout,
         target_keywords=lora_targets,
     )
-    print(f"Frozen SonoNexus backbone with {injected} LoRA Linear adapters.")
+    print(f"Encoder only: {injected} attention layers with Q/V LoRA adapters; no reconstruction decoder.")
     return backbone.to(device)
 
 

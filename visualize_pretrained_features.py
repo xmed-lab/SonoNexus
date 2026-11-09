@@ -3,6 +3,8 @@ import csv
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -210,7 +212,7 @@ def extract_embeddings(model: VisionUlt, loader: DataLoader, device: torch.devic
     with torch.no_grad():
         for images, batch_labels, batch_paths in tqdm(loader, desc="extract embeddings", ncols=100):
             images = images.to(device)
-            features = to_nchw(model.merge(model.model(images)[-1]))
+            features = to_nchw(model.model(images)[-1])
             pooled = F.adaptive_avg_pool2d(features, 1).flatten(1)
             embeddings.append(pooled.cpu())
             labels.extend(batch_labels)
@@ -246,7 +248,7 @@ def main():
 
     dataset = UltrasoundImageFolder(args.image_dir, img_size=args.img_size)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
-    model = load_pretrained_model(args.checkpoint or None, device=device, strict=False)
+    model = load_pretrained_model(args.checkpoint or None, device=device, img_size=args.img_size)
 
     images, labels, paths = next(iter(loader))
     images = images.to(device)
@@ -254,7 +256,7 @@ def main():
 
     with torch.no_grad():
         recon = model(images, masks)
-        masked_features = model.merge(model.model(images * (1.0 - masks))[-1])
+        masked_features = model.model(images * (1.0 - masks))[-1]
 
     anchors = ["avg", "max"] if args.anchor == "both" else [args.anchor]
     heatmaps = [similarity_heatmap(masked_features, (args.img_size, args.img_size), anchor) for anchor in anchors]
