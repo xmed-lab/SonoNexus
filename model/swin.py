@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.vision_transformer import Block
 
-# The main model retains the standard Swin-B stage depths.
+# Keep standard Swin-B stage depths; only the patch projection is replaced.
 ENCODER_DEPTHS = (2, 2, 18, 2)
 ENCODER_CHANNELS = (128, 256, 512, 1024)
 EMBED_PATCH_SIZE = 2
@@ -49,7 +49,11 @@ class VisionUlt(nn.Module):
             Block(512, 8, mlp_ratio=4.0, qkv_bias=True, norm_layer=nn.LayerNorm)
             for _ in range(4)
         ])
-        self.decoder_fc = nn.Linear(512, in_channels * patch_size ** 2, bias=True)
+        self.decoder_fc = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(512, in_channels * patch_size ** 2, bias=True),
+        )
+        self.merge = nn.Sequential(nn.Linear(ENCODER_CHANNELS[-1], 768))
 
     def decode(self, stage3):
         batch, height, width, dim = stage3.shape
@@ -69,8 +73,8 @@ class VisionUlt(nn.Module):
         reconstruction = self.decode(masked_features[2])
         loss_mask, loss_visible = self.forward_reconloss(target, reconstruction, mask)
         # Average tokens are the global/class representations used for CL.
-        full_global = full_features[3].mean(dim=(1, 2))
-        masked_global = masked_features[3].mean(dim=(1, 2))
+        full_global = self.merge(full_features[3].mean(dim=(1, 2)))
+        masked_global = self.merge(masked_features[3].mean(dim=(1, 2)))
         loss_cl = info_nce_loss(full_global, masked_global, self.temperature)
         return reconstruction, loss_mask, loss_visible, loss_cl
 

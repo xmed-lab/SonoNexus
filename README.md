@@ -94,21 +94,21 @@ Ultrasound images with bounding-box annotations and class labels for anatomical 
 
 The pre-training model is implemented in `model/swin.py`.
 
-- **Backbone**: Swin-B from `timm`, trained from scratch, main-model depths `(2, 2, 18, 2)` (24 blocks), 2x2 patch embedding and feature channels `(128, 256, 512, 1024)`. The original initialization is preserved: create the patch4 model first, then replace only `patch_embed.proj` with `Conv2d(3, 128, kernel_size=2, stride=2)`. Stored patch/grid metadata and window/shift settings retain their original values; this is intentionally different from constructing a native patch2 model.
+- **Backbone**: Swin-B from `timm`, trained from scratch, retaining standard depths `(2, 2, 18, 2)` (24 blocks) and feature channels `(128, 256, 512, 1024)`. Only the patch-embedding projection is changed to 2x2. The original initialization is preserved: create the patch4 model first, then replace only `patch_embed.proj` with `Conv2d(3, 128, kernel_size=2, stride=2)`. Stored patch/grid metadata and window/shift settings retain their original values; this is intentionally different from constructing a native patch2 model.
 - **Objective 1**: masked image reconstruction on ultrasound patches.
-- **Objective 2**: contrastive alignment of average-pooled final-stage features from a full augmented view and a masked second augmented view. Reconstruction targets the second view, preserving spatial correspondence.
+- **Objective 2**: contrastive alignment of average-pooled final-stage features after the shared `merge` projection (`Linear(1024, 768)`), using a full augmented view and a masked second augmented view. Reconstruction targets the second view, preserving spatial correspondence.
 - **Training loop**: `train_mae_cnn.py` with TensorBoard/W&B logging and reconstruction previews.
 
 Pre-trained model weights can be downloaded from:
 [Google Drive checkpoint folder](https://drive.google.com/drive/folders/1Ff7fdXIGN9nsWqf9la0Tc7kYRKxFds04?usp=drive_link)
 
-`model/swin.py` is the single architecture definition. Stage 3 supplies the reconstruction decoder (four 512-dimensional Transformer blocks, eight heads, a single Linear output, and 8x8 RGB output patches). Stage 4 supplies 1024-dimensional average tokens for contrastive learning. Embedding patches are 2x2; masking and reconstruction patches are 8x8.
+`model/swin.py` is the single architecture definition. Stage 3 supplies the reconstruction decoder (four 512-dimensional Transformer blocks, eight heads, a `ReLU + Linear(512, 192)` output head, and 8x8 RGB output patches). Stage 4 supplies 1024-dimensional average tokens, projected to 768 dimensions by `merge` for contrastive learning. Embedding patches are 2x2; masking and reconstruction patches are 8x8.
 
 Paper pretraining defaults: 224x224 input, 300 epochs, total batch size 512, AdamW betas `(0.9, 0.95)`, weight decay 0.05, and `lr = 1.5e-4 * batch_size / 256` (3e-4 at batch size 512). A 10-epoch linear warm-up precedes cosine decay. `--lr` optionally overrides the scaled learning rate.
 
 Each image produces two independently augmented views: random resized crop (scale 0.2–1.0), horizontal flip (p=0.5), color jitter (0.4/0.4/0.2/0.1, p=0.8), random grayscale (p=0.2), and Gaussian blur (kernel 23, sigma 0.1–2.0; p=0.5/0.1). Mask ratios are uniform in 0.1–0.8. The loss retains the original separately averaged masked/visible L1 terms and InfoNCE (temperature 0.07, contrastive weight 1 by default).
 
-`load_model.py` reuses this architecture for reconstruction and visualization; there is no additional `merge` projection. It checks all model weights. Downstream loading constructs only the encoder, ignores reconstruction weights in full pretraining checkpoints, and strictly validates every encoder key. Reuse the timm version from the original training environment when reproducing published checkpoints; successful state-dict loading alone does not verify non-parameter window/shift behavior. Raw encoder state dicts, full pretraining state dicts and `state_dict`-wrapped checkpoints with optional `module.` prefixes are supported.
+`load_model.py` reuses the same encoder, reconstruction decoder and `merge` projection for full-model loading, and checks all model weights. Downstream loading constructs only the encoder, ignores both pretraining heads in full pretraining checkpoints, and strictly validates every encoder key. Reuse the timm version from the original training environment when reproducing published checkpoints; successful state-dict loading alone does not verify non-parameter window/shift behavior. Raw encoder state dicts, full pretraining state dicts and `state_dict`-wrapped checkpoints with optional `module.` prefixes are supported.
 
 ```bash
 python load_model.py \
@@ -282,4 +282,4 @@ This project is released under the Apache 2.0 License.
 
 ## Verification
 
-Run `python -m unittest discover -s tests -v` from this directory. Tests verify identical seeded parameters, grids, attention masks, shifts and 224x224 forward outputs against the original main-model initialization with `(2, 2, 18, 2)` depths, and exercise two-view pretraining gradients, strict full/encoder checkpoint loading, rejection of incomplete encoder weights, Q/V-only LoRA updates with an unchanged K slice, the downstream heads, the augmentation/mask pipeline, optimizer groups, warm-up/cosine decay and validation-based early stopping. No pretrained weights or clinical datasets are bundled; synthetic tests validate code behavior, not paper results.
+Run `python -m unittest discover -s tests -v` from this directory. Tests verify identical seeded parameters, grids, attention masks, shifts and 224x224 forward outputs against standard Swin-B with the original patch-projection replacement and `(2, 2, 18, 2)` depths, and exercise two-view pretraining gradients through the reconstruction and contrastive heads, strict full/encoder checkpoint loading, rejection of incomplete encoder weights, Q/V-only LoRA updates with an unchanged K slice, the downstream heads, the augmentation/mask pipeline, optimizer groups, warm-up/cosine decay and validation-based early stopping. No pretrained weights or clinical datasets are bundled; synthetic tests validate code behavior, not paper results.

@@ -43,8 +43,8 @@ class TrainingAlignmentTests(unittest.TestCase):
         gc.collect()
 
     def test_restored_constructor_matches_original_at_224(self):
-        # The original main-model constructor independently checks parameters,
-        # grids, masks and shifts; the deeper server model is an ablation.
+        # Standard Swin-B with the original patch-projection replacement,
+        # independently checking parameters, grids, masks and shifts.
         torch.manual_seed(137)
         original = timm.create_model(
             'swin_base_patch4_window7_224.ms_in22k', pretrained=False, features_only=True,
@@ -83,7 +83,8 @@ class TrainingAlignmentTests(unittest.TestCase):
         self.assertEqual(recon.shape, target.shape)
         self.assertTrue(torch.isfinite(torch.stack((masked, visible, contrast))).all())
         (masked + visible + contrast).backward()
-        self.assertGreater(self.pretrained.decoder_fc.weight.grad.abs().sum().item(), 0)
+        self.assertGreater(self.pretrained.decoder_fc[1].weight.grad.abs().sum().item(), 0)
+        self.assertGreater(self.pretrained.merge[0].weight.grad.abs().sum().item(), 0)
         self.assertGreater(self.pretrained.model.patch_embed.proj.weight.grad.abs().sum().item(), 0)
         self.pretrained.zero_grad(set_to_none=True)
 

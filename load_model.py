@@ -36,7 +36,7 @@ def read_checkpoint(checkpoint):
 
 
 def load_pretrained_encoder(checkpoint=None, device=None, img_size=224):
-    """Ignore reconstruction weights, but require every encoder weight to match."""
+    """Ignore pretraining heads, but require every encoder weight to match."""
     encoder = build_encoder(img_size=img_size)
     if checkpoint:
         state_dict = read_checkpoint(checkpoint)
